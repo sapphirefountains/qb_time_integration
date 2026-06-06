@@ -240,8 +240,10 @@ def summarize_log(log):
 	return {
 		"created": log.created_count or 0,
 		"updated": log.updated_count or 0,
+		"linked": log.linked_count or 0,
 		"deleted": log.deleted_count or 0,
 		"conflicts": log.conflict_count or 0,
+		"manual_review": log.manual_review_count or 0,
 		"failed": log.failed_count or 0,
 	}
 
@@ -257,8 +259,12 @@ def _track_result(log, result):
 		log.created_count = (log.created_count or 0) + 1
 	elif action == "updated" or action == "update":
 		log.updated_count = (log.updated_count or 0) + 1
+	elif action == "linked" or action == "link":
+		log.linked_count = (log.linked_count or 0) + 1
 	elif action == "deleted" or action == "delete":
 		log.deleted_count = (log.deleted_count or 0) + 1
+	elif action == "manual_review":
+		log.manual_review_count = (log.manual_review_count or 0) + 1
 	elif action == "conflict":
 		log.conflict_count = (log.conflict_count or 0) + 1
 	elif action == "failed":

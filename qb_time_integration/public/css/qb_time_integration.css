@@ -63,6 +63,25 @@
 	grid-template-columns: minmax(180px, 1fr) minmax(80px, 120px) minmax(120px, 180px);
 }
 
+.qbo-match-list {
+	border: 1px solid var(--border-color);
+	border-radius: 8px;
+	overflow: hidden;
+}
+
+.qbo-match-row {
+	align-items: center;
+	border-bottom: 1px solid var(--border-color);
+	display: grid;
+	gap: 10px;
+	grid-template-columns: minmax(180px, 1.2fr) minmax(140px, 0.8fr) minmax(180px, 1fr) minmax(100px, auto) auto;
+	padding: 10px 12px;
+}
+
+.qbo-match-row:last-child {
+	border-bottom: 0;
+}
+
 .qbo-entity-row:last-child,
 .qbo-log-row:last-child {
 	border-bottom: 0;
@@ -74,7 +93,8 @@
 
 @media (max-width: 640px) {
 	.qbo-entity-row,
-	.qbo-log-row {
+	.qbo-log-row,
+	.qbo-match-row {
 		grid-template-columns: 1fr;
 	}
 }

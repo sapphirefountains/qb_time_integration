@@ -61,14 +61,128 @@ def upsert_entity(entity_type: str, payload: dict, settings, *, overwrite=False,
 		save_mapping(entity_type, qbo_id, payload, erpnext_doctype, doc.name, values, conflict_status="Clean")
 		return {"action": "updated", "doctype": erpnext_doctype, "name": doc.name}
 
+	existing_match = find_existing_match(entity_type, payload, settings)
+	if existing_match:
+		if existing_match["status"] == "ambiguous":
+			if not preview:
+				save_pending_mapping(entity_type, qbo_id, payload, erpnext_doctype, existing_match)
+			return {
+				"action": "manual_review",
+				"doctype": erpnext_doctype,
+				"candidates": existing_match["candidates"],
+				"reason": existing_match["reason"],
+			}
+		if preview:
+			return {
+				"action": "link",
+				"doctype": erpnext_doctype,
+				"name": existing_match["name"],
+				"match_rule": existing_match["rule"],
+			}
+		doc = frappe.get_doc(erpnext_doctype, existing_match["name"])
+		applied_values = apply_blank_values(doc, values)
+		doc.save(ignore_permissions=True)
+		save_mapping(
+			entity_type,
+			qbo_id,
+			payload,
+			erpnext_doctype,
+			doc.name,
+			applied_values or _matching_owned_values(doc, values),
+			conflict_status="Clean",
+			match_status="Auto Matched",
+			match_rule=existing_match["rule"],
+			match_confidence=existing_match["confidence"],
+		)
+		return {
+			"action": "linked",
+			"doctype": erpnext_doctype,
+			"name": doc.name,
+			"match_rule": existing_match["rule"],
+			"filled_fields": list(applied_values),
+		}
+
 	if preview:
 		return {"action": "create", "doctype": erpnext_doctype, "fields": list(values)}
 
 	doc = frappe.new_doc(erpnext_doctype)
 	apply_values(doc, values)
 	doc.insert(ignore_permissions=True)
-	save_mapping(entity_type, qbo_id, payload, erpnext_doctype, doc.name, values, conflict_status="Clean")
+	save_mapping(
+		entity_type,
+		qbo_id,
+		payload,
+		erpnext_doctype,
+		doc.name,
+		values,
+		conflict_status="Clean",
+		match_status="Created",
+	)
 	return {"action": "created", "doctype": erpnext_doctype, "name": doc.name}
+
+
+def link_existing_record(entity_type: str, qbo_id: str, erpnext_doctype: str, erpnext_name: str, *, apply_qbo_data=False):
+	settings = frappe.get_single("QuickBooks Online Settings")
+	if not frappe.db.exists(erpnext_doctype, erpnext_name):
+		frappe.throw(f"{erpnext_doctype} {erpnext_name} does not exist.")
+
+	payload_doc = _latest_raw_payload(entity_type, qbo_id)
+	payload = json_loads(payload_doc.payload, default={}) if payload_doc else {}
+	if not payload:
+		frappe.throw("No QuickBooks raw payload is available for this entity. Sync or preview it first.")
+
+	expected_doctype, values = map_qbo_to_erpnext(entity_type, payload, settings)
+	if expected_doctype and expected_doctype != erpnext_doctype:
+		frappe.throw(f"{entity_type} should be linked to {expected_doctype}, not {erpnext_doctype}.")
+
+	owned_values = {}
+	if apply_qbo_data:
+		doc = frappe.get_doc(erpnext_doctype, erpnext_name)
+		owned_values = apply_blank_values(doc, values)
+		doc.save(ignore_permissions=True)
+
+	mapping = save_mapping(
+		entity_type,
+		qbo_id,
+		payload,
+		erpnext_doctype,
+		erpnext_name,
+		owned_values or _matching_owned_values(frappe.get_doc(erpnext_doctype, erpnext_name), values),
+		conflict_status="Clean",
+		match_status="Manual Matched",
+		match_rule="manual",
+		match_confidence=100,
+	)
+	frappe.db.commit()
+	return mapping.name
+
+
+def preview_existing_matches(entity_types=None, limit=100):
+	settings = frappe.get_single("QuickBooks Online Settings")
+	results = []
+	for raw in frappe.get_all(
+		"QuickBooks Raw Payload",
+		filters={"qbo_entity_type": ["in", entity_types or ["Account", "Customer", "Vendor", "Item", "TaxCode"]]},
+		fields=["qbo_entity_type", "qbo_id", "payload"],
+		order_by="creation desc",
+		limit_page_length=limit,
+	):
+		if not raw.qbo_id or get_mapping(raw.qbo_entity_type, raw.qbo_id):
+			continue
+		payload = json_loads(raw.payload, default={}) or {}
+		erpnext_doctype, values = map_qbo_to_erpnext(raw.qbo_entity_type, payload, settings)
+		match = find_existing_match(raw.qbo_entity_type, payload, settings)
+		results.append(
+			{
+				"entity_type": raw.qbo_entity_type,
+				"qbo_id": raw.qbo_id,
+				"qbo_name": _display_name(payload),
+				"erpnext_doctype": erpnext_doctype,
+				"match": match,
+				"mapped_fields": values,
+			}
+		)
+	return results
 
 
 def mark_deleted(entity_type: str, qbo_id: str, *, preview=False):
@@ -111,6 +225,27 @@ def save_mapping(entity_type: str, qbo_id: str, payload: dict, erpnext_doctype: 
 	return mapping
 
 
+def save_pending_mapping(entity_type: str, qbo_id: str, payload: dict, erpnext_doctype: str, match: dict):
+	mapping = get_mapping(entity_type, qbo_id) or frappe.new_doc("QuickBooks Sync Mapping")
+	mapping.qbo_entity_type = entity_type
+	mapping.qbo_id = str(qbo_id)
+	mapping.erpnext_doctype = erpnext_doctype
+	mapping.sync_token = payload.get("SyncToken")
+	mapping.last_qbo_updated_at = parse_qbo_datetime((payload.get("MetaData") or {}).get("LastUpdatedTime"))
+	mapping.last_synced_at = now_datetime()
+	mapping.deleted = 0
+	mapping.conflict_status = "Pending Review"
+	mapping.match_status = "Pending Review"
+	mapping.match_rule = match.get("reason")
+	mapping.match_confidence = 50
+	mapping.owned_fields = json_dumps({"candidates": match.get("candidates", [])})
+	if mapping.is_new():
+		mapping.insert(ignore_permissions=True)
+	else:
+		mapping.save(ignore_permissions=True)
+	return mapping
+
+
 def detect_conflicts(doc, incoming_values: dict, mapping) -> list[str]:
 	owned = json_loads(mapping.owned_fields, default={}) or {}
 	conflicts = []
@@ -131,12 +266,55 @@ def apply_values(doc, values: dict):
 			doc.set(fieldname, value)
 
 
+def apply_blank_values(doc, values: dict) -> dict:
+	applied = {}
+	for fieldname, value in values.items():
+		if value is None:
+			continue
+		if isinstance(value, list):
+			continue
+		if doc.get(fieldname) in (None, ""):
+			doc.set(fieldname, value)
+			applied[fieldname] = value
+	return applied
+
+
+def find_existing_match(entity_type: str, payload: dict, settings):
+	matchers = {
+		"Account": _match_account,
+		"Customer": _match_customer,
+		"Vendor": _match_supplier,
+		"Item": _match_item,
+		"TaxCode": _match_tax_code,
+	}
+	matcher = matchers.get(entity_type)
+	return matcher(payload, settings) if matcher else None
+
+
 def _normalize(value):
 	return "" if value is None else str(value)
 
 
 def _display_name(payload):
 	return payload.get("DisplayName") or payload.get("FullyQualifiedName") or payload.get("Name") or payload.get("Id")
+
+
+def _latest_raw_payload(entity_type, qbo_id):
+	name = frappe.db.get_value(
+		"QuickBooks Raw Payload",
+		{"qbo_entity_type": entity_type, "qbo_id": str(qbo_id)},
+		"name",
+		order_by="creation desc",
+	)
+	return frappe.get_doc("QuickBooks Raw Payload", name) if name else None
+
+
+def _matching_owned_values(doc, incoming_values: dict):
+	return {
+		fieldname: value
+		for fieldname, value in incoming_values.items()
+		if not isinstance(value, list) and _normalize(doc.get(fieldname)) == _normalize(value)
+	}
 
 
 def _map_account(payload, settings):
@@ -271,6 +449,98 @@ def _account_type(qbo_account_type):
 		"Other Income": "Income Account",
 	}
 	return account_type_map.get(qbo_account_type)
+
+
+def _match_account(payload, settings):
+	return _single_or_ambiguous(
+		"Account",
+		{"account_name": payload.get("Name"), "company": settings.company},
+		"account_name + company",
+		payload,
+		confidence=95,
+	)
+
+
+def _match_tax_code(payload, settings):
+	return _single_or_ambiguous(
+		"Account",
+		{"account_name": payload.get("Name") or f"QBO TaxCode {payload.get('Id')}", "company": settings.company},
+		"tax account name + company",
+		payload,
+		confidence=90,
+	)
+
+
+def _match_customer(payload, settings):
+	name = _display_name(payload)
+	email = (payload.get("PrimaryEmailAddr") or {}).get("Address")
+	for filters, rule, confidence in [
+		({"customer_name": name}, "customer_name", 95),
+		({"customer_name": payload.get("CompanyName")}, "company_name", 90),
+	]:
+		match = _single_or_ambiguous("Customer", filters, rule, payload, confidence=confidence)
+		if match:
+			return match
+	if email and _has_field("Customer", "email_id"):
+		return _single_or_ambiguous("Customer", {"email_id": email}, "email_id", payload, confidence=85)
+	return None
+
+
+def _match_supplier(payload, settings):
+	name = _display_name(payload)
+	email = (payload.get("PrimaryEmailAddr") or {}).get("Address")
+	for filters, rule, confidence in [
+		({"supplier_name": name}, "supplier_name", 95),
+		({"supplier_name": payload.get("CompanyName")}, "company_name", 90),
+	]:
+		match = _single_or_ambiguous("Supplier", filters, rule, payload, confidence=confidence)
+		if match:
+			return match
+	if email and _has_field("Supplier", "email_id"):
+		return _single_or_ambiguous("Supplier", {"email_id": email}, "email_id", payload, confidence=85)
+	return None
+
+
+def _match_item(payload, settings):
+	sku = payload.get("Sku")
+	name = payload.get("Name")
+	for filters, rule, confidence in [
+		({"item_code": sku}, "item_code/SKU", 98),
+		({"item_name": name}, "item_name", 90),
+	]:
+		match = _single_or_ambiguous("Item", filters, rule, payload, confidence=confidence)
+		if match:
+			return match
+	return None
+
+
+def _single_or_ambiguous(doctype, filters, rule, payload, confidence):
+	filters = {key: value for key, value in filters.items() if value not in (None, "")}
+	if not filters:
+		return None
+	candidates = frappe.get_all(doctype, filters=filters, fields=["name"], limit_page_length=5)
+	if len(candidates) == 1:
+		return {
+			"status": "matched",
+			"name": candidates[0].name,
+			"rule": rule,
+			"confidence": confidence,
+		}
+	if len(candidates) > 1:
+		return {
+			"status": "ambiguous",
+			"reason": rule,
+			"candidates": [{"doctype": doctype, "name": candidate.name} for candidate in candidates],
+			"qbo_name": _display_name(payload),
+		}
+	return None
+
+
+def _has_field(doctype, fieldname):
+	try:
+		return frappe.get_meta(doctype).has_field(fieldname)
+	except Exception:
+		return False
 
 
 def _sales_items(payload):
