@@ -1,7 +1,7 @@
 app_name = "qb_time_integration"
-app_title = "QuickBooks Time Integration"
+app_title = "QuickBooks Online Integration"
 app_publisher = "Sapphire Fountains"
-app_description = "Integrating data from QuickBooks Time to ERPNext."
+app_description = "Integrating QuickBooks Online accounting data and QuickBooks Time data with ERPNext."
 app_email = "info@sapphirefountains.com"
 app_license = "mit"
 
@@ -25,7 +25,7 @@ app_license = "mit"
 # ------------------
 
 # include js, css files in header of desk.html
-# app_include_css = "/assets/qb_time_integration/css/qb_time_integration.css"
+app_include_css = "/assets/qb_time_integration/css/qb_time_integration.css"
 # app_include_js = "/assets/qb_time_integration/js/qb_time_integration.js"
 
 # include js, css files in header of web template
@@ -43,7 +43,7 @@ app_license = "mit"
 # page_js = {"page" : "public/js/file.js"}
 
 # include js in doctype views
-# doctype_js = {"doctype" : "public/js/doctype.js"}
+doctype_js = {"QuickBooks Online Settings": "quickbooks_time_integration/doctype/quickbooks_online_settings/quickbooks_online_settings.js"}
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
 # doctype_calendar_js = {"doctype" : "public/js/doctype_calendar.js"}
@@ -148,23 +148,13 @@ app_license = "mit"
 # Scheduled Tasks
 # ---------------
 
-# scheduler_events = {
-# 	"all": [
-# 		"qb_time_integration.tasks.all"
-# 	],
-# 	"daily": [
-# 		"qb_time_integration.tasks.daily"
-# 	],
-# 	"hourly": [
-# 		"qb_time_integration.tasks.hourly"
-# 	],
-# 	"weekly": [
-# 		"qb_time_integration.tasks.weekly"
-# 	],
-# 	"monthly": [
-# 		"qb_time_integration.tasks.monthly"
-# 	],
-# }
+scheduler_events = {
+	"hourly": [
+		"qb_time_integration.quickbooks_time_integration.quickbooks_online.tasks.refresh_token_if_needed",
+		"qb_time_integration.quickbooks_time_integration.quickbooks_online.tasks.cdc_poll",
+		"qb_time_integration.quickbooks_time_integration.quickbooks_online.tasks.retry_failed_syncs",
+	],
+}
 
 # Testing
 # -------
