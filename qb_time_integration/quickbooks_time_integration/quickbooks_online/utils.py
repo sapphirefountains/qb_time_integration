@@ -53,9 +53,17 @@ def parse_qbo_datetime(value):
 	if not value:
 		return None
 	try:
-		return get_datetime(value)
+		parsed = get_datetime(value)
 	except Exception:
 		return None
+	if isinstance(parsed, str):
+		try:
+			parsed = datetime.fromisoformat(parsed.replace("Z", "+00:00"))
+		except ValueError:
+			return None
+	if getattr(parsed, "tzinfo", None):
+		parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+	return parsed
 
 
 def is_token_expiring(settings, buffer_minutes=5) -> bool:

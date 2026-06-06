@@ -45,6 +45,18 @@ def upsert_entity(entity_type: str, payload: dict, settings, *, overwrite=False,
 	if not qbo_id:
 		return {"action": "skipped", "reason": "QBO payload has no Id"}
 
+	preflight_issues = validate_mapped_values(entity_type, erpnext_doctype, values, include_doc_required=False)
+	if preflight_issues:
+		if not preview:
+			save_manual_review_mapping(entity_type, qbo_id, payload, erpnext_doctype, preflight_issues)
+		return {
+			"action": "manual_review",
+			"doctype": erpnext_doctype,
+			"qbo_id": qbo_id,
+			"reason": "; ".join(preflight_issues),
+			"issues": preflight_issues,
+		}
+
 	mapping = get_mapping(entity_type, qbo_id)
 	if mapping and mapping.erpnext_name and frappe.db.exists(erpnext_doctype, mapping.erpnext_name):
 		doc = frappe.get_doc(erpnext_doctype, mapping.erpnext_name)
@@ -103,7 +115,27 @@ def upsert_entity(entity_type: str, payload: dict, settings, *, overwrite=False,
 		}
 
 	if preview:
+		create_issues = validate_mapped_values(entity_type, erpnext_doctype, values)
+		if create_issues:
+			return {
+				"action": "manual_review",
+				"doctype": erpnext_doctype,
+				"qbo_id": qbo_id,
+				"reason": "; ".join(create_issues),
+				"issues": create_issues,
+			}
 		return {"action": "create", "doctype": erpnext_doctype, "fields": list(values)}
+
+	create_issues = validate_mapped_values(entity_type, erpnext_doctype, values)
+	if create_issues:
+		save_manual_review_mapping(entity_type, qbo_id, payload, erpnext_doctype, create_issues)
+		return {
+			"action": "manual_review",
+			"doctype": erpnext_doctype,
+			"qbo_id": qbo_id,
+			"reason": "; ".join(create_issues),
+			"issues": create_issues,
+		}
 
 	doc = frappe.new_doc(erpnext_doctype)
 	apply_values(doc, values)
@@ -256,6 +288,104 @@ def save_pending_mapping(entity_type: str, qbo_id: str, payload: dict, erpnext_d
 	else:
 		mapping.save(ignore_permissions=True)
 	return mapping
+
+
+def save_manual_review_mapping(entity_type: str, qbo_id: str, payload: dict, erpnext_doctype: str, issues: list[str]):
+	mapping = get_mapping(entity_type, qbo_id) or frappe.new_doc("QuickBooks Sync Mapping")
+	mapping.qbo_entity_type = entity_type
+	mapping.qbo_id = str(qbo_id)
+	mapping.erpnext_doctype = erpnext_doctype
+	mapping.sync_token = payload.get("SyncToken")
+	mapping.last_qbo_updated_at = parse_qbo_datetime((payload.get("MetaData") or {}).get("LastUpdatedTime"))
+	mapping.last_synced_at = now_datetime()
+	mapping.deleted = 0
+	mapping.conflict_status = "Pending Review"
+	mapping.match_status = "Pending Review"
+	mapping.match_rule = "preflight"
+	mapping.match_confidence = 0
+	mapping.owned_fields = json_dumps({"issues": issues})
+	if mapping.is_new():
+		mapping.insert(ignore_permissions=True)
+	else:
+		mapping.save(ignore_permissions=True)
+	return mapping
+
+
+def validate_mapped_values(
+	entity_type: str, erpnext_doctype: str, values: dict, *, include_doc_required: bool = True
+) -> list[str]:
+	issues = []
+	for fieldname in sorted(_required_mapped_fields(entity_type, erpnext_doctype, values, include_doc_required)):
+		if _is_empty_required_value(values.get(fieldname)):
+			issues.append(f"Missing required field: {fieldname}")
+	for account in _blocked_stock_accounts(entity_type, values):
+		issues.append(f"Stock account requires a stock transaction: {account}")
+	return issues
+
+
+def _required_mapped_fields(
+	entity_type: str, erpnext_doctype: str, values: dict, include_doc_required: bool = True
+) -> set[str]:
+	fields = {
+		"Invoice": {"company", "customer", "items"},
+		"Bill": {"company", "supplier", "items"},
+		"Estimate": {"company", "party_name", "items"},
+		"PurchaseOrder": {"company", "supplier", "items"},
+		"JournalEntry": {"company", "accounts"},
+	}.get(entity_type, set())
+	if not include_doc_required:
+		return fields
+	try:
+		meta = frappe.get_meta(erpnext_doctype)
+	except Exception:
+		return fields
+	for df in getattr(meta, "fields", []) or []:
+		if not getattr(df, "reqd", 0) or not getattr(df, "fieldname", None):
+			continue
+		if _can_validate_required_field(df, values):
+			fields.add(df.fieldname)
+	return fields
+
+
+def _can_validate_required_field(df, values: dict) -> bool:
+	if df.fieldname in values:
+		return True
+	if getattr(df, "default", None):
+		return False
+	return getattr(df, "fieldtype", None) in {
+		"Attach",
+		"Check",
+		"Code",
+		"Currency",
+		"Data",
+		"Date",
+		"Datetime",
+		"Float",
+		"Int",
+		"Link",
+		"Long Text",
+		"Percent",
+		"Select",
+		"Small Text",
+		"Table",
+		"Text",
+		"Time",
+	}
+
+
+def _is_empty_required_value(value):
+	return value in (None, "") or (isinstance(value, list) and not value)
+
+
+def _blocked_stock_accounts(entity_type: str, values: dict) -> list[str]:
+	if entity_type != "JournalEntry":
+		return []
+	stock_accounts = []
+	for row in values.get("accounts") or []:
+		account = row.get("account")
+		if account and frappe.db.get_value("Account", account, "account_type") == "Stock":
+			stock_accounts.append(account)
+	return stock_accounts
 
 
 def detect_conflicts(doc, incoming_values: dict, mapping) -> list[str]:

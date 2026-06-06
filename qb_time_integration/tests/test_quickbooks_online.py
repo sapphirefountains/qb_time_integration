@@ -1,4 +1,5 @@
 import base64
+from datetime import datetime
 import hashlib
 import hmac
 import sys
@@ -6,8 +7,8 @@ import types
 
 
 def install_frappe_stub():
-	frappe = types.ModuleType("frappe")
-	frappe_utils = types.ModuleType("frappe.utils")
+	frappe = sys.modules.get("frappe") or types.ModuleType("frappe")
+	frappe_utils = sys.modules.get("frappe.utils") or types.ModuleType("frappe.utils")
 	frappe_utils.now_datetime = lambda: None
 	frappe_utils.get_datetime = lambda value: value
 	frappe_utils.add_to_date = lambda value=None, **kwargs: value
@@ -79,6 +80,13 @@ def test_verify_intuit_signature_accepts_valid_hmac():
 
 	assert verify_intuit_signature(body, signature, token)
 	assert not verify_intuit_signature(body, "bad", token)
+
+
+def test_parse_qbo_datetime_converts_offset_to_naive_utc():
+	install_frappe_stub()
+	from qb_time_integration.quickbooks_time_integration.quickbooks_online.utils import parse_qbo_datetime
+
+	assert parse_qbo_datetime("2025-04-28 10:25:02-07:00") == datetime(2025, 4, 28, 17, 25, 2)
 
 
 def test_customer_mapping_uses_native_erpnext_fields():
@@ -183,6 +191,41 @@ def test_payment_without_mapped_party_is_skipped():
 
 	assert doctype is None
 	assert values == {}
+
+
+def test_preflight_flags_site_required_customer_fields_without_defaults():
+	frappe = install_frappe_stub()
+	frappe.get_meta = lambda doctype: types.SimpleNamespace(
+		fields=[
+			types.SimpleNamespace(fieldname="customer_name", fieldtype="Data", reqd=1, default=None),
+			types.SimpleNamespace(fieldname="custom_lead_source", fieldtype="Link", reqd=1, default=None),
+		],
+		has_field=lambda fieldname: False,
+	)
+	from qb_time_integration.quickbooks_time_integration.quickbooks_online.mapping import validate_mapped_values
+
+	assert validate_mapped_values("Customer", "Customer", {"customer_name": "Weiskopf Consulting"}) == [
+		"Missing required field: custom_lead_source"
+	]
+	assert (
+		validate_mapped_values(
+			"Customer",
+			"Customer",
+			{"customer_name": "Weiskopf Consulting"},
+			include_doc_required=False,
+		)
+		== []
+	)
+
+
+def test_preflight_flags_transactions_with_missing_links_and_rows():
+	install_frappe_stub()
+	from qb_time_integration.quickbooks_time_integration.quickbooks_online.mapping import validate_mapped_values
+
+	assert validate_mapped_values("Bill", "Purchase Invoice", {"company": "Demo", "supplier": None, "items": []}) == [
+		"Missing required field: items",
+		"Missing required field: supplier",
+	]
 
 
 def test_customer_auto_match_uses_existing_customer_name():
