@@ -12,7 +12,10 @@ from qb_time_integration.quickbooks_time_integration.quickbooks_online.constants
 	MASTER_ENTITIES,
 	TRANSACTION_ENTITIES,
 )
-from qb_time_integration.quickbooks_time_integration.quickbooks_online.mapping import mark_deleted, upsert_entity
+from qb_time_integration.quickbooks_time_integration.quickbooks_online.mapping import (
+	mark_deleted,
+	upsert_entity,
+)
 from qb_time_integration.quickbooks_time_integration.quickbooks_online.utils import get_settings, json_dumps
 
 
@@ -24,16 +27,21 @@ def import_all(entity_types=None):
 		settings.status = "Syncing"
 		settings.save(ignore_permissions=True)
 		for entity_type in ordered_entities(entity_types):
-			for payload in query_all(entity_type, settings=settings):
-				store_raw_payload("Import", entity_type, payload, sync_log=log.name, realm_id=settings.realm_id)
+			for payload in query_entity_payloads(entity_type, settings=settings):
+				store_raw_payload(
+					"Import",
+					entity_type,
+					_clean_payload(payload),
+					sync_log=log.name,
+					realm_id=settings.realm_id,
+				)
 				_track_result(log, safe_upsert(entity_type, payload, settings))
-		log.status = "Completed"
-		log.finished_at = now_datetime()
-		settings.last_full_import = now_datetime()
-		settings.status = "Connected"
-		settings.status_message = "Full import completed."
+		finish_log(log)
+		if log.status == "Completed":
+			settings.last_full_import = now_datetime()
+		settings.status = "Failed" if log.status == "Failed" else "Connected"
+		settings.status_message = _status_message(log, "Full import completed.")
 		settings.save(ignore_permissions=True)
-		log.save(ignore_permissions=True)
 		frappe.db.commit()
 		return log.name
 	except Exception as exc:
@@ -48,15 +56,19 @@ def preview_resync(entity_types=None):
 	preview = []
 	try:
 		for entity_type in ordered_entities(entity_types):
-			for payload in query_all(entity_type, settings=settings):
-				store_raw_payload("Resync", entity_type, payload, sync_log=log.name, realm_id=settings.realm_id)
+			for payload in query_entity_payloads(entity_type, settings=settings):
+				store_raw_payload(
+					"Resync",
+					entity_type,
+					_clean_payload(payload),
+					sync_log=log.name,
+					realm_id=settings.realm_id,
+				)
 				result = safe_upsert(entity_type, payload, settings, preview=True)
 				_track_result(log, result)
 				preview.append({"entity_type": entity_type, "qbo_id": payload.get("Id"), **result})
 		log.preview_payload = json_dumps(preview)
-		log.status = "Completed"
-		log.finished_at = now_datetime()
-		log.save(ignore_permissions=True)
+		finish_log(log)
 		frappe.db.commit()
 		return {"preview_id": log.name, "summary": summarize_log(log), "changes": preview}
 	except Exception as exc:
@@ -80,9 +92,7 @@ def run_resync(preview_id):
 			payload = json.loads(raw.payload)
 			result = safe_upsert(raw.qbo_entity_type, payload, settings, overwrite=True)
 			_track_result(log, result)
-		log.status = "Completed"
-		log.finished_at = now_datetime()
-		log.save(ignore_permissions=True)
+		finish_log(log)
 		frappe.db.commit()
 		return {"sync_log": log.name, "summary": summarize_log(log)}
 	except Exception as exc:
@@ -100,9 +110,7 @@ def sync_entity(entity_type, qbo_id, source="Manual"):
 		store_raw_payload(source, entity_type, payload, sync_log=log.name, realm_id=settings.realm_id)
 		result = upsert_entity(entity_type, payload, settings)
 		_track_result(log, result)
-		log.status = "Completed"
-		log.finished_at = now_datetime()
-		log.save(ignore_permissions=True)
+		finish_log(log)
 		frappe.db.commit()
 		return {"sync_log": log.name, "result": result}
 	except Exception as exc:
@@ -125,19 +133,20 @@ def run_cdc():
 					if not isinstance(payloads, list):
 						continue
 					for payload in payloads:
-						store_raw_payload("CDC", entity_type, payload, sync_log=log.name, realm_id=settings.realm_id)
+						store_raw_payload(
+							"CDC", entity_type, payload, sync_log=log.name, realm_id=settings.realm_id
+						)
 						if payload.get("status") == "Deleted":
 							result = mark_deleted(entity_type, payload.get("Id"))
 						else:
 							result = safe_upsert(entity_type, payload, settings)
 						_track_result(log, result)
-		settings.last_cdc_sync = now_datetime()
-		settings.status = "Connected"
-		settings.status_message = "CDC sync completed."
+		finish_log(log)
+		if log.status == "Completed":
+			settings.last_cdc_sync = now_datetime()
+		settings.status = "Failed" if log.status == "Failed" else "Connected"
+		settings.status_message = _status_message(log, "CDC sync completed.")
 		settings.save(ignore_permissions=True)
-		log.status = "Completed"
-		log.finished_at = now_datetime()
-		log.save(ignore_permissions=True)
 		frappe.db.commit()
 		return log.name
 	except Exception as exc:
@@ -149,7 +158,9 @@ def retry_failed(log_name=None):
 	filters = {"status": "Failed"}
 	if log_name:
 		filters["name"] = log_name
-	for log in frappe.get_all("QuickBooks Sync Log", filters=filters, fields=["name", "sync_type", "retry_count"]):
+	for log in frappe.get_all(
+		"QuickBooks Sync Log", filters=filters, fields=["name", "sync_type", "retry_count"]
+	):
 		if (log.retry_count or 0) >= (get_settings().retry_limit or 3):
 			continue
 		doc = frappe.get_doc("QuickBooks Sync Log", log.name)
@@ -168,14 +179,38 @@ def query_all(entity_type, settings=None):
 	start_position = 1
 	max_results = 100
 	while True:
-		response = client.query(f"select * from {entity_type} startposition {start_position} maxresults {max_results}")
+		response = client.query(
+			f"select * from {entity_type} startposition {start_position} maxresults {max_results}"
+		)
 		query_response = response.get("QueryResponse") or {}
 		records = query_response.get(entity_type) or []
-		for record in records:
-			yield record
+		yield from records
 		if len(records) < max_results:
 			break
 		start_position += max_results
+
+
+def query_entity_payloads(entity_type, settings=None):
+	if entity_type != "Account":
+		yield from query_all(entity_type, settings=settings)
+		return
+
+	payloads = list(query_all(entity_type, settings=settings))
+	parent_ids = {
+		str(parent_id)
+		for parent_id in ((payload.get("ParentRef") or {}).get("value") for payload in payloads)
+		if parent_id
+	}
+	for payload in payloads:
+		enriched = dict(payload)
+		enriched["_qbo_has_children"] = str(payload.get("Id")) in parent_ids
+		yield enriched
+
+
+def _clean_payload(payload):
+	if not isinstance(payload, dict):
+		return payload
+	return {key: value for key, value in payload.items() if not key.startswith("_qbo_")}
 
 
 def safe_upsert(entity_type, payload, settings, **kwargs):
@@ -188,6 +223,7 @@ def safe_upsert(entity_type, payload, settings, **kwargs):
 		)
 		return {
 			"action": "failed",
+			"entity_type": entity_type,
 			"reason": frappe.get_traceback(),
 			"qbo_id": payload.get("Id") if isinstance(payload, dict) else None,
 		}
@@ -236,6 +272,18 @@ def fail_log(log, exc):
 	frappe.db.commit()
 
 
+def finish_log(log):
+	log.status = "Failed" if (log.failed_count or 0) else "Completed"
+	log.finished_at = now_datetime()
+	log.save(ignore_permissions=True)
+
+
+def _status_message(log, completed_message):
+	if log.status == "Failed":
+		return f"Sync finished with {log.failed_count or 0} failed record(s). See QuickBooks Sync Log {log.name}."
+	return completed_message
+
+
 def summarize_log(log):
 	return {
 		"created": log.created_count or 0,
@@ -269,3 +317,28 @@ def _track_result(log, result):
 		log.conflict_count = (log.conflict_count or 0) + 1
 	elif action == "failed":
 		log.failed_count = (log.failed_count or 0) + 1
+		_append_failure_message(log, result)
+
+
+def _append_failure_message(log, result):
+	failure_number = log.failed_count or 1
+	if failure_number > 20:
+		if failure_number == 21:
+			log.error_message = (
+				(log.error_message or "").rstrip()
+				+ "\nAdditional failures omitted. See Error Log for full tracebacks."
+			).strip()
+		return
+
+	reason = _last_non_empty_line(result.get("reason")) or "Unknown error"
+	entity = result.get("entity_type") or log.entity_type or "Unknown entity"
+	qbo_id = result.get("qbo_id") or "unknown QBO ID"
+	message = f"{failure_number}. {entity} {qbo_id}: {reason}"
+	log.error_message = ((log.error_message or "").rstrip() + "\n" + message).strip()
+
+
+def _last_non_empty_line(text):
+	if not text:
+		return None
+	lines = [line.strip() for line in str(text).splitlines() if line.strip()]
+	return lines[-1] if lines else None

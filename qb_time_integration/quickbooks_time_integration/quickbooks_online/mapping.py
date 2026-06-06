@@ -121,7 +121,9 @@ def upsert_entity(entity_type: str, payload: dict, settings, *, overwrite=False,
 	return {"action": "created", "doctype": erpnext_doctype, "name": doc.name}
 
 
-def link_existing_record(entity_type: str, qbo_id: str, erpnext_doctype: str, erpnext_name: str, *, apply_qbo_data=False):
+def link_existing_record(
+	entity_type: str, qbo_id: str, erpnext_doctype: str, erpnext_name: str, *, apply_qbo_data=False
+):
 	settings = frappe.get_single("QuickBooks Online Settings")
 	if not frappe.db.exists(erpnext_doctype, erpnext_name):
 		frappe.throw(f"{erpnext_doctype} {erpnext_name} does not exist.")
@@ -162,7 +164,9 @@ def preview_existing_matches(entity_types=None, limit=100):
 	results = []
 	for raw in frappe.get_all(
 		"QuickBooks Raw Payload",
-		filters={"qbo_entity_type": ["in", entity_types or ["Account", "Customer", "Vendor", "Item", "TaxCode"]]},
+		filters={
+			"qbo_entity_type": ["in", entity_types or ["Account", "Customer", "Vendor", "Item", "TaxCode"]]
+		},
 		fields=["qbo_entity_type", "qbo_id", "payload"],
 		order_by="creation desc",
 		limit_page_length=limit,
@@ -205,7 +209,15 @@ def get_mapping(entity_type: str, qbo_id: str):
 	return frappe.get_doc("QuickBooks Sync Mapping", name) if name else None
 
 
-def save_mapping(entity_type: str, qbo_id: str, payload: dict, erpnext_doctype: str, erpnext_name: str, values: dict, **extra):
+def save_mapping(
+	entity_type: str,
+	qbo_id: str,
+	payload: dict,
+	erpnext_doctype: str,
+	erpnext_name: str,
+	values: dict,
+	**extra,
+):
 	mapping = get_mapping(entity_type, qbo_id) or frappe.new_doc("QuickBooks Sync Mapping")
 	mapping.qbo_entity_type = entity_type
 	mapping.qbo_id = str(qbo_id)
@@ -253,9 +265,9 @@ def detect_conflicts(doc, incoming_values: dict, mapping) -> list[str]:
 		if fieldname not in incoming_values:
 			continue
 		current_value = doc.get(fieldname)
-		if _normalize(current_value) != _normalize(previous_value) and _normalize(current_value) != _normalize(
-			incoming_values[fieldname]
-		):
+		if _normalize(current_value) != _normalize(previous_value) and _normalize(
+			current_value
+		) != _normalize(incoming_values[fieldname]):
 			conflicts.append(fieldname)
 	return conflicts
 
@@ -296,7 +308,12 @@ def _normalize(value):
 
 
 def _display_name(payload):
-	return payload.get("DisplayName") or payload.get("FullyQualifiedName") or payload.get("Name") or payload.get("Id")
+	return (
+		payload.get("DisplayName")
+		or payload.get("FullyQualifiedName")
+		or payload.get("Name")
+		or payload.get("Id")
+	)
 
 
 def _latest_raw_payload(entity_type, qbo_id):
@@ -318,10 +335,15 @@ def _matching_owned_values(doc, incoming_values: dict):
 
 
 def _map_account(payload, settings):
+	parent_account = _qbo_parent_account(payload, settings)
 	return "Account", {
 		"account_name": payload.get("Name"),
 		"company": settings.company,
-		"is_group": 0,
+		"parent_account": parent_account,
+		"is_group": 1
+		if payload.get("_qbo_has_children") or (payload.get("SubAccount") is False and not parent_account)
+		else 0,
+		"root_type": _account_root_type(payload.get("AccountType")),
 		"account_type": _account_type(payload.get("AccountType")),
 	}
 
@@ -330,8 +352,8 @@ def _map_customer(payload, settings):
 	return "Customer", {
 		"customer_name": _display_name(payload),
 		"customer_type": "Company" if payload.get("CompanyName") else "Individual",
-		"customer_group": _default_or_none("Customer Group", "All Customer Groups"),
-		"territory": _default_or_none("Territory", "All Territories"),
+		"customer_group": _default_group("Customer Group", "All Customer Groups"),
+		"territory": _default_group("Territory", "All Territories"),
 	}
 
 
@@ -339,7 +361,7 @@ def _map_supplier(payload, settings):
 	return "Supplier", {
 		"supplier_name": _display_name(payload),
 		"supplier_type": "Company" if payload.get("CompanyName") else "Individual",
-		"supplier_group": _default_or_none("Supplier Group", "All Supplier Groups"),
+		"supplier_group": _default_group("Supplier Group", "All Supplier Groups"),
 	}
 
 
@@ -377,10 +399,15 @@ def _map_purchase_invoice(payload, settings):
 
 
 def _map_payment_entry(payload, settings):
+	party_type, party = _payment_party(payload)
+	if not party_type or not party:
+		return None, {}
 	return "Payment Entry", {
 		"company": settings.company,
 		"posting_date": payload.get("TxnDate"),
 		"payment_type": "Receive",
+		"party_type": party_type,
+		"party": party,
 		"remarks": f"Imported from QuickBooks Online payment/deposit {payload.get('Id')}",
 	}
 
@@ -417,7 +444,9 @@ def _map_tax_code(payload, settings):
 	return "Account", {
 		"account_name": payload.get("Name") or f"QBO TaxCode {payload.get('Id')}",
 		"company": settings.company,
+		"parent_account": _root_account_for_type("Liability", settings),
 		"is_group": 0,
+		"root_type": "Liability",
 		"account_type": "Tax",
 	}
 
@@ -436,12 +465,72 @@ def _default_or_none(doctype: str, name: str):
 	return name if frappe.db.exists(doctype, name) else None
 
 
+def _default_group(doctype: str, fallback_name: str):
+	name = frappe.db.get_value(doctype, {"is_group": 0}, "name")
+	if name:
+		return name
+	return None
+
+
+def _qbo_parent_account(payload, settings):
+	parent_ref = payload.get("ParentRef") or {}
+	parent_qbo_id = parent_ref.get("value")
+	if parent_qbo_id:
+		parent = _linked_name("Account", "Account", parent_qbo_id)
+		if parent:
+			return parent
+	return _root_account_for_type(_account_root_type(payload.get("AccountType")), settings)
+
+
+def _root_account_for_type(root_type, settings):
+	if not root_type:
+		return None
+	accounts = frappe.get_all(
+		"Account",
+		filters={"company": settings.company, "is_group": 1, "root_type": root_type},
+		fields=["name"],
+		limit_page_length=1,
+	)
+	return accounts[0].name if accounts else None
+
+
+def _payment_party(payload):
+	customer = _linked_name("Customer", "Customer", (payload.get("CustomerRef") or {}).get("value"))
+	if customer:
+		return "Customer", customer
+	vendor = _linked_name("Vendor", "Supplier", (payload.get("VendorRef") or {}).get("value"))
+	if vendor:
+		return "Supplier", vendor
+	return None, None
+
+
+def _account_root_type(qbo_account_type):
+	root_type_map = {
+		"Bank": "Asset",
+		"Accounts Receivable": "Asset",
+		"Fixed Asset": "Asset",
+		"Other Current Asset": "Asset",
+		"Other Asset": "Asset",
+		"Accounts Payable": "Liability",
+		"Credit Card": "Liability",
+		"Other Current Liability": "Liability",
+		"Long Term Liability": "Liability",
+		"Equity": "Equity",
+		"Income": "Income",
+		"Other Income": "Income",
+		"Expense": "Expense",
+		"Other Expense": "Expense",
+		"Cost of Goods Sold": "Expense",
+	}
+	return root_type_map.get(qbo_account_type)
+
+
 def _account_type(qbo_account_type):
 	account_type_map = {
 		"Bank": "Bank",
 		"Accounts Receivable": "Receivable",
 		"Accounts Payable": "Payable",
-		"Credit Card": "Bank",
+		"Credit Card": "Payable",
 		"Fixed Asset": "Fixed Asset",
 		"Expense": "Expense Account",
 		"Other Expense": "Expense Account",
@@ -464,7 +553,10 @@ def _match_account(payload, settings):
 def _match_tax_code(payload, settings):
 	return _single_or_ambiguous(
 		"Account",
-		{"account_name": payload.get("Name") or f"QBO TaxCode {payload.get('Id')}", "company": settings.company},
+		{
+			"account_name": payload.get("Name") or f"QBO TaxCode {payload.get('Id')}",
+			"company": settings.company,
+		},
 		"tax account name + company",
 		payload,
 		confidence=90,
