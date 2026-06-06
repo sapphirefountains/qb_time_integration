@@ -3,7 +3,7 @@ name = "qb_time_integration"
 authors = [
     { name = "Sapphire Fountains", email = "info@sapphirefountains.com"}
 ]
-description = "Integrating data from QuickBooks Time to ERPNext."
+description = "Integrating QuickBooks Online accounting data and QuickBooks Time data with ERPNext."
 requires-python = ">=3.10"
 readme = "README.md"
 dynamic = ["version"]
