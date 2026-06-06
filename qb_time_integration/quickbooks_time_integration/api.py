@@ -5,8 +5,10 @@ import frappe
 from qb_time_integration.quickbooks_time_integration.quickbooks_online.api import (
 	get_dashboard_status,
 	import_all,
+	link_existing_record,
 	oauth_callback,
 	preview_resync,
+	preview_existing_matches,
 	quickbooks_webhook,
 	retry_failed,
 	run_resync,

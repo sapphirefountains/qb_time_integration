@@ -5,6 +5,10 @@ import secrets
 import frappe
 
 from qb_time_integration.quickbooks_time_integration.quickbooks_online.client import QuickBooksClient
+from qb_time_integration.quickbooks_time_integration.quickbooks_online.mapping import (
+	link_existing_record as run_link_existing_record,
+	preview_existing_matches as run_preview_existing_matches,
+)
 from qb_time_integration.quickbooks_time_integration.quickbooks_online.sync import (
 	import_all as run_import_all,
 	preview_resync as run_preview_resync,
@@ -66,6 +70,24 @@ def retry_failed(log_name=None):
 	return run_retry_failed(log_name=log_name)
 
 
+@frappe.whitelist()
+def preview_existing_matches(entity_types=None, limit=100):
+	if isinstance(entity_types, str):
+		entity_types = [entity.strip() for entity in entity_types.split(",") if entity.strip()]
+	return run_preview_existing_matches(entity_types=entity_types, limit=int(limit or 100))
+
+
+@frappe.whitelist()
+def link_existing_record(entity_type, qbo_id, erpnext_doctype, erpnext_name, apply_qbo_data=0):
+	return run_link_existing_record(
+		entity_type,
+		qbo_id,
+		erpnext_doctype,
+		erpnext_name,
+		apply_qbo_data=frappe.utils.cint(apply_qbo_data),
+	)
+
+
 @frappe.whitelist(allow_guest=True)
 def quickbooks_webhook():
 	return handle_webhook()
@@ -84,8 +106,10 @@ def get_dashboard_status():
 			"entity_type",
 			"created_count",
 			"updated_count",
+			"linked_count",
 			"deleted_count",
 			"conflict_count",
+			"manual_review_count",
 			"failed_count",
 			"modified",
 		],
@@ -111,4 +135,3 @@ def get_dashboard_status():
 
 def _state_key(state):
 	return f"qbo_oauth_state:{state}"
-

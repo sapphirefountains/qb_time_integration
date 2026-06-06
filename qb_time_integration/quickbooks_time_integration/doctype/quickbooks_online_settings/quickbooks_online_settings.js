@@ -1,6 +1,7 @@
 frappe.ui.form.on("QuickBooks Online Settings", {
 	refresh(frm) {
 		frm.add_custom_button(__("Dashboard"), () => frappe.set_route("quickbooks-online-dashboard"));
+		frm.add_custom_button(__("Link Existing Records"), () => frappe.set_route("quickbooks-online-dashboard"));
 		frm.add_custom_button(__("Connect QuickBooks"), () => {
 			frappe.call({
 				method: "qb_time_integration.quickbooks_time_integration.quickbooks_online.api.start_oauth",

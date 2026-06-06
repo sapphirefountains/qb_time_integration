@@ -16,6 +16,10 @@ def install_frappe_stub():
 		exists=lambda doctype, name: name in {"All Customer Groups", "All Territories", "All Supplier Groups", "All Item Groups", "Nos"},
 		get_value=lambda *args, **kwargs: None,
 	)
+	frappe.get_all = lambda doctype, filters=None, fields=None, limit_page_length=None, **kwargs: [
+		types.SimpleNamespace(name="Acme Supply")
+	] if doctype == "Customer" and filters == {"customer_name": "Acme Supply"} else []
+	frappe.get_meta = lambda doctype: types.SimpleNamespace(has_field=lambda fieldname: False)
 	sys.modules.setdefault("frappe", frappe)
 	sys.modules.setdefault("frappe.utils", frappe_utils)
 	return frappe
@@ -53,3 +57,18 @@ def test_customer_mapping_uses_native_erpnext_fields():
 	assert doctype == "Customer"
 	assert values["customer_name"] == "Acme Supply"
 	assert values["customer_type"] == "Company"
+
+
+def test_customer_auto_match_uses_existing_customer_name():
+	install_frappe_stub()
+	from qb_time_integration.quickbooks_time_integration.quickbooks_online.mapping import find_existing_match
+
+	match = find_existing_match(
+		"Customer",
+		{"Id": "1", "DisplayName": "Acme Supply", "CompanyName": "Acme Supply"},
+		types.SimpleNamespace(company="Demo Company"),
+	)
+
+	assert match["status"] == "matched"
+	assert match["name"] == "Acme Supply"
+	assert match["rule"] == "customer_name"

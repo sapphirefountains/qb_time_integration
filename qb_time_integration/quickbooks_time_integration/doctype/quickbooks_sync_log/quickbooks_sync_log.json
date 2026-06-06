@@ -14,8 +14,10 @@
   "finished_at",
   "created_count",
   "updated_count",
+  "linked_count",
   "deleted_count",
   "conflict_count",
+  "manual_review_count",
   "failed_count",
   "retry_count",
   "preview_payload",
@@ -69,6 +71,12 @@
   },
   {
    "default": "0",
+   "fieldname": "linked_count",
+   "fieldtype": "Int",
+   "label": "Linked Existing Count"
+  },
+  {
+   "default": "0",
    "fieldname": "deleted_count",
    "fieldtype": "Int",
    "label": "Deleted Count"
@@ -78,6 +86,12 @@
    "fieldname": "conflict_count",
    "fieldtype": "Int",
    "label": "Conflict Count"
+  },
+  {
+   "default": "0",
+   "fieldname": "manual_review_count",
+   "fieldtype": "Int",
+   "label": "Manual Review Count"
   },
   {
    "default": "0",

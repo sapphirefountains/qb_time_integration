@@ -16,6 +16,9 @@
   "last_synced_at",
   "deleted",
   "conflict_status",
+  "match_status",
+  "match_rule",
+  "match_confidence",
   "owned_fields"
  ],
  "fields": [
@@ -72,7 +75,26 @@
    "fieldname": "conflict_status",
    "fieldtype": "Select",
    "label": "Conflict Status",
-   "options": "Clean\nConflict\nIgnored"
+   "options": "Clean\nConflict\nIgnored\nPending Review"
+  },
+  {
+   "default": "Not Matched",
+   "fieldname": "match_status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Match Status",
+   "options": "Not Matched\nAuto Matched\nManual Matched\nPending Review\nCreated"
+  },
+  {
+   "fieldname": "match_rule",
+   "fieldtype": "Data",
+   "label": "Match Rule"
+  },
+  {
+   "default": "0",
+   "fieldname": "match_confidence",
+   "fieldtype": "Percent",
+   "label": "Match Confidence"
   },
   {
    "description": "JSON object of ERPNext fields owned by the QuickBooks sync.",
